@@ -1,0 +1,480 @@
+SpringBoot使用Sharding-JDBC读写分离
+转载自：https://developer.aliyun.com/article/690021?spm=a2c6h.12873639.0.0.92c34cf84qWl7n
+
+简介： 本文介绍SpringBoot使用当当Sharding-JDBC进行读写分离。 1.有关Sharding-JDBC 本文还是基于当当网Sharding-Jdbc的依赖，与上一篇使用Sharding-Jdbc进行分库分表依赖一致，并且本文大致内容与上一篇文章相似，建议先查看我的另一篇在查看这篇会简单许多，传送门《SpringBoot使用Sharding-JDBC分库分表》。
+本文介绍SpringBoot使用当当Sharding-JDBC进行读写分离。
+
+1.有关Sharding-JDBC
+本文还是基于当当网Sharding-Jdbc的依赖，与上一篇使用Sharding-Jdbc进行分库分表依赖一致，并且本文大致内容与上一篇文章相似，建议先查看我的另一篇在查看这篇会简单许多，传送门《SpringBoot使用Sharding-JDBC分库分表》。
+
+这里需要特殊介绍的是，使用Sharding-JDBC进行读写分离的时候，只允许设置一个主库，从库的话可以设置多个，访问策略的话从源码上看只有两种轮询（ROUND_ROBIN）和随机（RANDOM）。
+
+源码代码如下:
+
+package com.dangdang.ddframe.rdb.sharding.api.strategy.slave;
+
+public enum MasterSlaveLoadBalanceStrategyType {
+    ROUND_ROBIN(new RoundRobinMasterSlaveLoadBalanceStrategy()),
+    RANDOM(new RandomMasterSlaveLoadBalanceStrategy());
+
+    private final MasterSlaveLoadBalanceStrategy strategy;
+
+    public static MasterSlaveLoadBalanceStrategyType getDefaultStrategyType() {
+        return ROUND_ROBIN;
+    }
+
+    private MasterSlaveLoadBalanceStrategyType(MasterSlaveLoadBalanceStrategy strategy) {
+        this.strategy = strategy;
+    }
+
+    public MasterSlaveLoadBalanceStrategy getStrategy() {
+        return this.strategy;
+    }
+}
+2.本文场景
+由于本地环境并没有使用Mysql主从复制，只是创建了三个库，其中database0作为主库，database1和database2作为从库。主库进行增删改操作，从库进行查询操作，如下图为本文数据库的三个表。
+
+
+
+如上图分别是三个数据库中的user表，其中master-user为database0数据库中的user表，salve-user1为database1中的user表，salve-user2为database2中的user表。
+
+3.代码实现
+本文使用SpringBoot2.0.3，SpringData-JPA，Druid连接池，和当当的sharding-jdbc。
+
+3.1 建表SQL
+创建表和数据库的SQL如下所示，这里默认在从库内分别插入了一条数据，name值分别存放dalaoyang1和dalaoyang2便于区分。
+
+CREATE DATABASE database0;
+USE database0;
+DROP TABLE IF EXISTS `user`;
+CREATE TABLE `user`(
+    id bigint(64) not null,
+    city varchar(20) not null,
+    name varchar(20) not null,
+    PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+CREATE DATABASE database1;
+USE database1;
+DROP TABLE IF EXISTS `user`;
+CREATE TABLE `user`(
+    id bigint(64) not null,
+    city varchar(20) not null,
+    name varchar(20) not null,
+    PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+INSERT INTO `database1`.`user`(`id`, `city`, `name`) VALUES (101, 'beijing', 'dalaoyang1');
+
+CREATE DATABASE database2;
+USE database2;
+DROP TABLE IF EXISTS `user`;
+CREATE TABLE `user`(
+    id bigint(64) not null,
+    city varchar(20) not null,
+    name varchar(20) not null,
+    PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+INSERT INTO `database2`.`user`(`id`, `city`, `name`) VALUES (102, 'beijing', 'dalaoyang2');
+3.2 依赖文件
+新建项目，依赖文件还是当当的sharding-jdbc-core依赖和druid连接池，完整pom文件代码如下所示。
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.0.3.RELEASE</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+    <groupId>com.dalaoyang</groupId>
+    <artifactId>springboot2_shardingjdbc_dxfl</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>springboot2_shardingjdbc_dxfl</name>
+    <description>springboot2_shardingjdbc_dxfl</description>
+
+    <properties>
+        <java.version>1.8</java.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-devtools</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>mysql</groupId>
+            <artifactId>mysql-connector-java</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <!-- druid -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid</artifactId>
+            <version>1.1.9</version>
+        </dependency>
+        <!-- sharding-jdbc -->
+        <dependency>
+            <groupId>com.dangdang</groupId>
+            <artifactId>sharding-jdbc-core</artifactId>
+            <version>1.5.4</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
+3.3 配置信息
+在配置信息中配置了三个数据库的信息和JPA的简单配置。
+
+##Jpa配置
+spring.jpa.database=mysql
+spring.jpa.show-sql=true
+spring.jpa.hibernate.ddl-auto=none
+
+##数据库配置
+##数据库database0地址
+database0.url=jdbc:mysql://localhost:3306/database0?characterEncoding=utf8&useSSL=false
+##数据库database0用户名
+database0.username=root
+##数据库database0密码
+database0.password=root
+##数据库database0驱动
+database0.driverClassName=com.mysql.jdbc.Driver
+##数据库database0名称
+database0.databaseName=database0
+
+##数据库database1地址
+database1.url=jdbc:mysql://localhost:3306/database1?characterEncoding=utf8&useSSL=false
+##数据库database1用户名
+database1.username=root
+##数据库database1密码
+database1.password=root
+##数据库database1驱动
+database1.driverClassName=com.mysql.jdbc.Driver
+##数据库database1名称
+database1.databaseName=database1
+
+##数据库database2地址
+database2.url=jdbc:mysql://localhost:3306/database2?characterEncoding=utf8&useSSL=false
+##数据库database1用户名
+database2.username=root
+##数据库database1密码
+database2.password=root
+##数据库database1驱动
+database2.driverClassName=com.mysql.jdbc.Driver
+##数据库database1名称
+database2.databaseName=database2
+3.4 启动类
+上一篇文章说到在启动类加入了@EnableAutoConfiguration去除数据库自动配置，当时也没太注意，其实可以直接在@SpringBootApplication注解上去除数据库自动配置，剩下的和上一篇一样，使用@EnableTransactionManagement开启事务，使用@EnableConfigurationProperties注解加入配置实体，启动类完整代码如下所示。
+
+package com.dalaoyang;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+
+@SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})
+@EnableTransactionManagement(proxyTargetClass = true)
+@EnableConfigurationProperties
+public class Springboot2ShardingjdbcDxflApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(Springboot2ShardingjdbcDxflApplication.class, args);
+    }
+
+}
+3.5 实体类和数据库操作层
+User实体类。
+
+package com.dalaoyang.entity;
+
+import lombok.Data;
+
+import javax.persistence.*;
+
+@Entity
+@Table(name="user")
+@Data
+public class User {
+
+    @Id
+    private Long id;
+
+    private String city;
+
+    private String name;
+}
+UserRepository类。
+
+package com.dalaoyang.repository;
+
+import com.dalaoyang.entity.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface UserRepository extends JpaRepository<User,Long> {
+}
+3.6 数据库参数类
+数据库配置类，Database0Config。
+
+package com.dalaoyang.database;
+
+import com.alibaba.druid.pool.DruidDataSource;
+import lombok.Data;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+import javax.sql.DataSource;
+
+/**
+ * @author yangyang
+ * @date 2019/1/30
+ */
+@Data
+@ConfigurationProperties(prefix = "database0")
+@Component
+public class Database0Config {
+    private String url;
+    private String username;
+    private String password;
+    private String driverClassName;
+    private String databaseName;
+
+    public DataSource createDataSource() {
+        DruidDataSource result = new DruidDataSource();
+        result.setDriverClassName(getDriverClassName());
+        result.setUrl(getUrl());
+        result.setUsername(getUsername());
+        result.setPassword(getPassword());
+        return result;
+    }
+}
+数据库配置类，Database1Config。
+
+package com.dalaoyang.database;
+
+import com.alibaba.druid.pool.DruidDataSource;
+import lombok.Data;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+import javax.sql.DataSource;
+
+/**
+ * @author yangyang
+ * @date 2019/1/30
+ */
+@Data
+@ConfigurationProperties(prefix = "database1")
+@Component
+public class Database1Config {
+    private String url;
+    private String username;
+    private String password;
+    private String driverClassName;
+    private String databaseName;
+
+    public DataSource createDataSource() {
+        DruidDataSource result = new DruidDataSource();
+        result.setDriverClassName(getDriverClassName());
+        result.setUrl(getUrl());
+        result.setUsername(getUsername());
+        result.setPassword(getPassword());
+        return result;
+    }
+}
+数据库配置类，Database2Config。
+
+package com.dalaoyang.database;
+
+import com.alibaba.druid.pool.DruidDataSource;
+import lombok.Data;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
+
+import javax.sql.DataSource;
+
+/**
+ * @author yangyang
+ * @date 2019/1/30
+ */
+@Data
+@ConfigurationProperties(prefix = "database2")
+@Component
+public class Database2Config {
+    private String url;
+    private String username;
+    private String password;
+    private String driverClassName;
+    private String databaseName;
+
+    public DataSource createDataSource() {
+        DruidDataSource result = new DruidDataSource();
+        result.setDriverClassName(getDriverClassName());
+        result.setUrl(getUrl());
+        result.setUsername(getUsername());
+        result.setPassword(getPassword());
+        return result;
+    }
+}
+3.7 读写分离配置
+创建一个DataSourceConfig类来设置读写分离，这里其实也与分库分表类似，也可以在分库分表的基础上进行读写分离，需要创建一个Map集合来接收从库。在创建数据源时需要传入五个参数，分别是：
+
+name：数据源名称
+masterDataSourceName：主库数据源名称
+masterDataSource：主数据源
+slaveDataSourceMap：从数据源集合
+strategyType：访问策略
+当然，也可以使用其他方法创建数据源，本文代码如下：
+
+package com.dalaoyang.database;
+
+
+import com.dangdang.ddframe.rdb.sharding.api.MasterSlaveDataSourceFactory;
+import com.dangdang.ddframe.rdb.sharding.api.strategy.slave.MasterSlaveLoadBalanceStrategyType;
+import com.dangdang.ddframe.rdb.sharding.keygen.DefaultKeyGenerator;
+import com.dangdang.ddframe.rdb.sharding.keygen.KeyGenerator;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import javax.sql.DataSource;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * @author yangyang
+ * @date 2019/1/29
+ */
+@Configuration
+public class DataSourceConfig {
+
+    @Autowired
+    private Database0Config database0Config;
+
+    @Autowired
+    private Database1Config database1Config;
+
+    @Autowired
+    private Database2Config database2Config;
+
+    @Bean
+    public DataSource getDataSource() throws SQLException {
+        return buildDataSource();
+    }
+
+    private DataSource buildDataSource() throws SQLException {
+        //设置从库数据源集合
+        Map<String, DataSource> slaveDataSourceMap = new HashMap<>();
+        slaveDataSourceMap.put(database1Config.getDatabaseName(), database1Config.createDataSource());
+        slaveDataSourceMap.put(database2Config.getDatabaseName(), database2Config.createDataSource());
+
+        //获取数据源对象
+        DataSource dataSource = MasterSlaveDataSourceFactory.createDataSource("masterSlave",database0Config.getDatabaseName()
+                ,database0Config.createDataSource(), slaveDataSourceMap, MasterSlaveLoadBalanceStrategyType.getDefaultStrategyType());
+        return dataSource;
+    }
+
+
+    @Bean
+    public KeyGenerator keyGenerator() {
+        return new DefaultKeyGenerator();
+    }
+
+}
+3.8 Controller
+Controller做为测试类，创建两个方法，save方法和getAll方法，其中：
+
+save方法用于测试主库的插入和修改
+getAll方法用于测试读数据
+UserController类如下所示。
+
+package com.dalaoyang.controller;
+
+import com.dalaoyang.entity.User;
+import com.dalaoyang.repository.UserRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class UserController {
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @GetMapping("save")
+    public void save(){
+        User user = new User();
+        user.setId(100L);
+        user.setName("dalaoyang");
+        user.setCity("beijing");
+        userRepository.save(user);
+    }
+
+    @GetMapping("getAll")
+    public Object getAll(){
+        return userRepository.findAll();
+    }
+}
+4.测试
+4.1 测试主库
+使用postman访问http://localhost:8080/save，控制台如图所示。
+
+
+
+再次访问，如图。
+
+
+
+主键冲突了，其实这是由于插入的时候使用的database0，但是查询使用的是database1和database2，但是我在从库内并没有ID是100的数据，所以JPA判定我为插入，但是数据库内缺有这样的数据。
+
+我们接下来测试一下查询。访问http://localhost:8080/getAll
+
+
+
+再次访问，如图。
+
+
+
+证明从库的读取是正常的，接下来修改从库的ID为100。然后访问http://localhost:8080/save，查看控制台如图。
+
+
+
+因为存在了ID为100的数据，所以SQL为修改语句。
+
+5.源码
+源码地址：https://gitee.com/dalaoyang/springboot_learn/tree/master/springboot2_shardingjdbc_dxfl
